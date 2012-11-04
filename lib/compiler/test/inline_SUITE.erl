@@ -258,6 +258,28 @@ lists(Config) when is_list(Config) ->
 
     %% Cleanup.
     erase(?MODULE),
+
+    ?line {'EXIT',{function_clause,_}} =
+        (catch lists:map(fun (X) -> X end, not_a_list)),
+    ?line {'EXIT',{function_clause,_}} =
+        (catch lists:flatmap(fun (X) -> X end, not_a_list)),
+    ?line {'EXIT',{function_clause,_}} =
+        (catch lists:foreach(fun (X) -> X end, not_a_list)),
+    ?line {'EXIT',{function_clause,_}} =
+        (catch lists:filter(fun (_) -> true end, not_a_list)),
+    ?line {'EXIT',{function_clause,_}} =
+        (catch lists:any(fun (_) -> false end, not_a_list)),
+    ?line {'EXIT',{function_clause,_}} =
+        (catch lists:all(fun (_) -> true end, not_a_list)),
+    ?line {'EXIT',{function_clause,_}} =
+        (catch lists:foldl(fun (X, Acc) -> {X,Acc} end, acc, not_a_list)),
+    ?line {'EXIT',{function_clause,_}} =
+        (catch lists:foldr(fun (X, Acc) -> {X,Acc} end, acc, not_a_list)),
+    ?line {'EXIT',{function_clause,_}} =
+        (catch lists:mapfoldl(fun (X, Acc) -> {X,Acc} end, acc, not_a_list)),
+    ?line {'EXIT',{function_clause,_}} =
+        (catch lists:mapfoldr(fun (X, Acc) -> {X,Acc} end, acc, not_a_list)),
+
     ok.
 		       
 my_apply(M, F, A, Init) ->

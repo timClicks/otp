@@ -280,6 +280,26 @@ lists(Config) when is_list(Config) ->
     ?line {'EXIT',{function_clause,_}} =
         (catch lists:mapfoldr(fun (X, Acc) -> {X,Acc} end, acc, not_a_list)),
 
+    ?line {'EXIT',{function_clause,_}} = (catch lists:map(not_a_function, [])),
+    ?line {'EXIT',{function_clause,_}} =
+        (catch lists:flatmap(not_a_function, [])),
+    ?line {'EXIT',{function_clause,_}} =
+        (catch lists:foreach(not_a_function, [])),
+    ?line {'EXIT',{function_clause,_}} =
+        (catch lists:filter(not_a_function, [])),
+    ?line {'EXIT',{function_clause,_}} =
+        (catch lists:any(not_a_function, [])),
+    ?line {'EXIT',{function_clause,_}} =
+        (catch lists:all(not_a_function, [])),
+    ?line {'EXIT',{function_clause,_}} =
+        (catch lists:foldl(not_a_function, acc, [])),
+    ?line {'EXIT',{function_clause,_}} =
+        (catch lists:foldr(not_a_function, acc, [])),
+    ?line {'EXIT',{function_clause,_}} =
+        (catch lists:mapfoldl(not_a_function, acc, [])),
+    ?line {'EXIT',{function_clause,_}} =
+        (catch lists:mapfoldr(not_a_function, acc, [])),
+
     ok.
 		       
 my_apply(M, F, A, Init) ->

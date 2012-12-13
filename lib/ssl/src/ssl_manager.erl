@@ -145,7 +145,8 @@ new_session_id(Port) ->
     call({new_session_id, Port}).
 
 clean_cert_db(Ref, File) ->
-    erlang:send_after(?CLEAN_CERT_DB, self(), {clean_cert_db, Ref, File}).
+    erlang:send_after(?CLEAN_CERT_DB, self(), {clean_cert_db, Ref, File}),
+    ok.
 
 %%--------------------------------------------------------------------
 -spec register_session(inet:port_number(), #session{}) -> ok.
@@ -358,7 +359,7 @@ terminate(_Reason, #state{certificate_db = Db,
 			  session_cache = SessionCache,
 			  session_cache_cb = CacheCb,
 			  session_validation_timer = Timer}) ->
-    erlang:cancel_timer(Timer),
+    _ = erlang:cancel_timer(Timer),
     ssl_certificate_db:remove(Db),
     CacheCb:terminate(SessionCache),
     ok.

@@ -158,15 +158,18 @@ handle_info({Caller, {reply, Reply}}, S) ->
 handle_info({From, {sbcast, Name, Msg}}, S) ->
     case catch Name ! Msg of  %% use catch to get the printout
 	{'EXIT', _} ->
-	    From ! {?NAME, node(), {nonexisting_name, Name}};
+	    From ! {?NAME, node(), {nonexisting_name, Name}},
+	    ok;
 	_ -> 
-	    From ! {?NAME, node(), node()}
+	    From ! {?NAME, node(), node()},
+	    ok
     end,
     {noreply, S};
 handle_info({From, {send, Name, Msg}}, S) ->
     case catch Name ! {From, Msg} of %% use catch to get the printout
 	{'EXIT', _} ->
-	    From ! {?NAME, node(), {nonexisting_name, Name}};
+	    From ! {?NAME, node(), {nonexisting_name, Name}},
+	    ok;
 	_ ->
 	    ok    %% It's up to Name to respond !!!!!
     end,
@@ -426,7 +429,7 @@ abcast(Name, Mess) ->
 abcast([Node|Tail], Name, Mess) ->
     Dest = {Name,Node},
     case catch erlang:send(Dest, Mess, [noconnect]) of
-	noconnect -> spawn(erlang, send, [Dest,Mess]);
+	noconnect -> spawn(erlang, send, [Dest,Mess]), ok;
 	_ -> ok
     end,
     abcast(Tail, Name, Mess);

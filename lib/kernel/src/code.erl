@@ -368,8 +368,7 @@ load_code_server_prerequisites() ->
 	      os,
 	      packages,
 	      unicode],
-    [M = M:module_info(module) || M <- Needed],
-    ok.
+    lists:foreach(fun(M) -> M = M:module_info(module) end, Needed).
 
 do_stick_dirs() ->
     do_s(compiler),

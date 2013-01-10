@@ -311,6 +311,18 @@ typedef struct {
     unsigned        flags;    /* Original flags from FILE_OPEN. */
     void          (*invoke)(void *);
     struct t_data  *d;
+    /*
+     * If an operation against a compressed file is being executed
+     * by an async thread, ensure the stop callback doesn't close
+     * the fd (gzFile) while the async thread doesn't finish using
+     * the fd (gzFile) - otherwise it accesses a dangling pointer.
+     * The following comp_op_* variables are used to coordinate the
+     * driver stop callback with the ongoing async operation.
+     */
+    int             comp_op_in_progress;
+    volatile int    comp_op_done;
+    erts_mtx_t      comp_op_mtx;
+    erts_cnd_t      comp_op_cnd;
     void          (*free)(void *);
     struct t_data  *cq_head;  /* Queue of incoming commands */
     struct t_data  *cq_tail;  /* -""- */
@@ -426,6 +438,9 @@ struct t_data
     struct t_data *next;
     int            command;
     int            level;
+    int volatile  *comp_op_done;
+    erts_mtx_t    *comp_op_mtx;
+    erts_cnd_t    *comp_op_cnd;
     void         (*invoke)(void *);
     void         (*free)(void *);
     int            again;
@@ -714,6 +729,14 @@ static struct t_data *cq_deq(file_descriptor *desc) {
     return d;
 }
 
+static void signal_comp_op_done(struct t_data *d) {
+    if (d->comp_op_done != NULL) {
+        erts_mtx_lock(d->comp_op_mtx);
+        *(d->comp_op_done) = 1;
+        erts_cnd_signal(d->comp_op_cnd);
+        erts_mtx_unlock(d->comp_op_mtx);
+    }
+}
 
 /*********************************************************************
  * Driver entry point -> init
@@ -757,6 +780,8 @@ file_start(ErlDrvPort port, char* command)
     desc->key = (unsigned int) (UWord) port;
     desc->flags = 0;
     desc->invoke = NULL;
+    desc->comp_op_in_progress = 0;
+    desc->comp_op_done = 0;
     desc->d = NULL;
     desc->free = NULL;
     desc->cq_head = NULL;
@@ -800,6 +825,7 @@ static void invoke_close(void *data)
     DTRACE_INVOKE_SETUP(FILE_CLOSE);
     d->again = 0;
     do_close(d->flags, d->fd);
+    signal_comp_op_done(d);
     DTRACE_INVOKE_RETURN(FILE_CLOSE);
 }
 
@@ -814,9 +840,20 @@ file_stop(ErlDrvData e)
     TRACE_C('p');
 
     if (desc->fd != FILE_FD_INVALID) {
+	if (desc->comp_op_in_progress) {
+	    erts_mtx_lock(&desc->comp_op_mtx);
+	    while (!desc->comp_op_done) {
+		erts_cnd_wait(&desc->comp_op_cnd, &desc->comp_op_mtx);
+	    }
+	    erts_mtx_unlock(&desc->comp_op_mtx);
+	}
 	do_close(desc->flags, desc->fd);
 	desc->fd = FILE_FD_INVALID;
 	desc->flags = 0;
+	if (sys_info.async_threads > 0 && (desc->flags & EFILE_COMPRESSED)) {
+	    erts_cnd_destroy(&desc->comp_op_cnd);
+	    erts_mtx_destroy(&desc->comp_op_mtx);
+	}
     }
     if (desc->read_binp) {
 	driver_free_binary(desc->read_binp);
@@ -1038,6 +1075,7 @@ static void invoke_mkdir(void *data)
 {
     DTRACE_INVOKE_SETUP_BY_NAME(FILE_MKDIR);
     invoke_name(data, efile_mkdir);
+    signal_comp_op_done((struct t_data *) data);
     DTRACE_INVOKE_RETURN(FILE_MKDIR);
 }
 
@@ -1045,6 +1083,7 @@ static void invoke_rmdir(void *data)
 {
     DTRACE_INVOKE_SETUP_BY_NAME(FILE_RMDIR);
     invoke_name(data, efile_rmdir);
+    signal_comp_op_done((struct t_data *) data);
     DTRACE_INVOKE_RETURN(FILE_RMDIR);
 }
 
@@ -1052,6 +1091,7 @@ static void invoke_delete_file(void *data)
 {
     DTRACE_INVOKE_SETUP_BY_NAME(FILE_DELETE);
     invoke_name(data, efile_delete_file);
+    signal_comp_op_done((struct t_data *) data);
     DTRACE_INVOKE_RETURN(FILE_DELETE);
 }
 
@@ -1059,6 +1099,7 @@ static void invoke_chdir(void *data)
 {
     DTRACE_INVOKE_SETUP_BY_NAME(FILE_CHDIR);
     invoke_name(data, efile_chdir);
+    signal_comp_op_done((struct t_data *) data);
     DTRACE_INVOKE_RETURN(FILE_CHDIR);
 }
 
@@ -1070,6 +1111,7 @@ static void invoke_fdatasync(void *data)
 
     d->again = 0;
     d->result_ok = efile_fdatasync(&d->errInfo, fd);
+    signal_comp_op_done(d);
     DTRACE_INVOKE_RETURN(FILE_FDATASYNC);
 }
 
@@ -1081,6 +1123,7 @@ static void invoke_fsync(void *data)
 
     d->again = 0;
     d->result_ok = efile_fsync(&d->errInfo, fd);
+    signal_comp_op_done(d);
     DTRACE_INVOKE_RETURN(FILE_FSYNC);
 }
 
@@ -1092,6 +1135,7 @@ static void invoke_truncate(void *data)
 
     d->again = 0;
     d->result_ok = efile_truncate_file(&d->errInfo, &fd, d->flags);
+    signal_comp_op_done(d);
     DTRACE_INVOKE_RETURN(FILE_TRUNCATE);
 }
 
@@ -1135,6 +1179,7 @@ static void invoke_read(void *data)
     } else {
 	d->again = 0;
     }
+    signal_comp_op_done(d);
     DTRACE_INVOKE_RETURN(FILE_READ);
 }
 
@@ -1244,6 +1289,7 @@ static void invoke_read_line(void *data)
 	    break;
 	}
     } while (local_loop);
+    signal_comp_op_done(d);
     DTRACE_INVOKE_RETURN(FILE_READ_LINE);
 }
 
@@ -1304,6 +1350,7 @@ static void invoke_read_file(void *data)
  done:
     d->again = 0;
  chop_done:
+    signal_comp_op_done(d);
     DTRACE_INVOKE_RETURN(FILE_READ_FILE);
 }
 
@@ -1369,6 +1416,7 @@ static void invoke_preadv(void *data)
     }					
     d->again = 0;
  done:
+    signal_comp_op_done(d);
     DTRACE_INVOKE_RETURN(FILE_PREADV);
 }
 
@@ -1440,6 +1488,7 @@ static void invoke_ipread(void *data)
  done:
     d->result_ok = !0;
     d->again = 0;
+    signal_comp_op_done(d);
     DTRACE_INVOKE_RETURN(FILE_IPREAD);
 }
 
@@ -1537,6 +1586,7 @@ static void invoke_writev(void *data) {
 	TRACE_F(("w%lu", (unsigned long)size));
 
     }
+    signal_comp_op_done(d);
     DTRACE_INVOKE_RETURN(FILE_WRITE);
 }
 
@@ -1556,6 +1606,7 @@ static void invoke_pwd(void *data)
     d->again = 0;
     d->result_ok = efile_getdcwd(&d->errInfo,d->drive, d->b+1,
 				 RESBUFSIZE-1);
+    signal_comp_op_done(d);
     DTRACE_INVOKE_RETURN(FILE_PWD);
 }
 
@@ -1570,6 +1621,7 @@ static void invoke_readlink(void *data)
 				  RESBUFSIZE-1);
     if (d->result_ok != 0)
 	FILENAME_COPY((char *) d->b + 1, resbuf+1);
+    signal_comp_op_done(d);
     DTRACE_INVOKE_RETURN(FILE_READLINK);
 }
 
@@ -1584,6 +1636,7 @@ static void invoke_altname(void *data)
 				  RESBUFSIZE-1);
     if (d->result_ok != 0)
 	FILENAME_COPY((char *) d->b + 1, resbuf+1);
+    signal_comp_op_done(d);
     DTRACE_INVOKE_RETURN(FILE_ALTNAME);
 }
 
@@ -1676,6 +1729,7 @@ static void invoke_pwritev(void *data) {
 	}
     }
  done:
+    signal_comp_op_done(d);
     EF_FREE(iov); /* Free our copy of the vector, nothing to restore */
     DTRACE_INVOKE_RETURN(FILE_PWRITEV);
 }
@@ -1701,6 +1755,7 @@ static void invoke_flstat(void *data)
     DTRACE3(efile_drv_int_entry, d->sched_i1, d->sched_i2,
             d->command == FILE_LSTAT ? FILE_LSTAT : FILE_FSTAT);
     gcc_optimizer_hack++;
+    signal_comp_op_done(d);
 }
 
 static void invoke_link(void *data)
@@ -1713,6 +1768,7 @@ static void invoke_link(void *data)
     d->again = 0;
     new_name = name+FILENAME_BYTELEN(name)+FILENAME_CHARSIZE;
     d->result_ok = efile_link(&d->errInfo, name, new_name);
+    signal_comp_op_done(d);
     DTRACE_INVOKE_RETURN(FILE_LINK);
 }
 
@@ -1726,6 +1782,7 @@ static void invoke_symlink(void *data)
     d->again = 0;
     new_name = name+FILENAME_BYTELEN(name)+FILENAME_CHARSIZE;
     d->result_ok = efile_symlink(&d->errInfo, name, new_name);
+    signal_comp_op_done(d);
     DTRACE_INVOKE_RETURN(FILE_SYMLINK);
 }
 
@@ -1739,6 +1796,7 @@ static void invoke_rename(void *data)
     d->again = 0;
     new_name = name+FILENAME_BYTELEN(name)+FILENAME_CHARSIZE;
     d->result_ok = efile_rename(&d->errInfo, name, new_name);
+    signal_comp_op_done(d);
     DTRACE_INVOKE_RETURN(FILE_RENAME);
 }
 
@@ -1749,6 +1807,7 @@ static void invoke_write_info(void *data)
 
     d->again = 0;
     d->result_ok = efile_write_info(&d->errInfo, &d->info, d->b);
+    signal_comp_op_done(d);
     DTRACE_INVOKE_RETURN(FILE_WRITE_INFO);
 }
 
@@ -1781,6 +1840,7 @@ static void invoke_lseek(void *data)
 			    &d->c.lseek.location);
     }
     d->result_ok = status;
+    signal_comp_op_done(d);
     DTRACE_INVOKE_RETURN(FILE_LSEEK);
 }
 
@@ -1828,6 +1888,7 @@ static void invoke_readdir(void *data)
     } while(res);
 
     d->result_ok = (d->errInfo.posix_errno == 0);
+    signal_comp_op_done(d);
     DTRACE_INVOKE_RETURN(FILE_READDIR);
 }
 
@@ -1882,6 +1943,7 @@ static void invoke_fadvise(void *data)
 
     d->again = 0;
     d->result_ok = efile_fadvise(&d->errInfo, fd, offset, length, advise);
+    signal_comp_op_done(d);
     DTRACE_INVOKE_RETURN(FILE_FADVISE);
 }
 
@@ -1912,6 +1974,7 @@ static void invoke_sendfile(void *data)
     } else {
 	d->result_ok = -1;
     }
+    signal_comp_op_done(d);
 }
 
 static void free_sendfile(void *data) {
@@ -2029,6 +2092,21 @@ static void cq_execute(file_descriptor *desc) {
 	return;
     TRACE_F(("x%i", (int) d->command));
     d->again = sys_info.async_threads == 0;
+
+    if ((desc->flags & EFILE_COMPRESSED) && (sys_info.async_threads > 0) &&
+        (desc->fd != FILE_FD_INVALID)) {
+
+	desc->comp_op_in_progress = 1;
+	desc->comp_op_done = 0;
+	d->comp_op_done = &desc->comp_op_done;
+	d->comp_op_mtx = &desc->comp_op_mtx;
+	d->comp_op_cnd = &desc->comp_op_cnd;
+    } else {
+	d->comp_op_done = NULL;
+	d->comp_op_mtx = NULL;
+	d->comp_op_cnd = NULL;
+    }
+
     DRIVER_ASYNC(d->level, desc, d->invoke, void_ptr=d, d->free);
 }
 
@@ -2253,6 +2331,8 @@ file_async_ready(ErlDrvData e, ErlDrvThreadData data)
 	return;
     }
 
+    desc->comp_op_in_progress = 0;
+
     switch (d->command)
     {
     case FILE_READ:
@@ -2381,6 +2461,10 @@ file_async_ready(ErlDrvData e, ErlDrvThreadData data)
 	} else {
 	    desc->fd = d->fd;
 	    desc->flags = d->flags;
+	    if (sys_info.async_threads > 0 && (desc->flags & EFILE_COMPRESSED)) {
+		erts_mtx_init(&desc->comp_op_mtx, "efile_drv comp op mutex");
+		erts_cnd_init(&desc->comp_op_cnd);
+	    }
 	    reply_Uint(desc, d->fd);
 	}
 	free_data(data);
